@@ -13,7 +13,12 @@ from contextlib import contextmanager
 
 # ---------- 路径 ----------
 def _resolve_db_file():
-    """DB 文件与 exe/脚本同目录，便于打包后持久化."""
+    """DB 文件与 exe/脚本同目录，便于打包后持久化.
+    支持 RS_DB_FILE 环境变量覆盖（pytest 用临时库隔离）.
+    """
+    env = os.environ.get("RS_DB_FILE")
+    if env:
+        return os.path.abspath(env)
     import sys
     try:
         base = sys._MEIPASS  # PyInstaller 解压目录
@@ -165,10 +170,64 @@ DEFAULT_MENUS = [
     ("menu_menu",        "菜单设置",   "system",     2, "📋", "menu-settings"),
 ]
 
+# ---------- Schema 版本与迁移 ----------
+# 基线版本（当前 SCHEMA 的版本）。
+# 变更规则：
+#   - 新装库：executescript(SCHEMA) 直接建最新结构，版本记为 SCHEMA_VERSION；
+#   - 已有库：不要改旧版本的 SCHEMA 语句，把新 DDL 放进 MIGRATIONS[新版本号]，
+#     init_db 时按版本从旧到新顺序补执行（ALTER TABLE 用 IF NOT EXISTS 不可用，需保证幂等由迁移函数负责）。
+SCHEMA_VERSION = 1
+
+# 版本号 -> SQL 语句列表 或 callable(conn)
+# 示例：
+# MIGRATIONS = {
+#     2: ["ALTER TABLE url_item ADD COLUMN favicon TEXT DEFAULT ''"],
+# }
+MIGRATIONS = {}
+
+
+def _get_version(conn):
+    """读取当前 schema 版本；schema_meta 不存在时创建（返回 0）."""
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_meta'"
+    ).fetchone()
+    if not row:
+        conn.execute("CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute("INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('version', '0')")
+        return 0
+    r = conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
+    return int(r[0]) if r else 0
+
+
+def _set_version(conn, ver):
+    conn.execute("UPDATE schema_meta SET value=? WHERE key='version'", (str(ver),))
+
+
+def migrate():
+    """按 MIGRATIONS 从旧到新补执行未应用的迁移，返回最终版本号."""
+    conn = _get_conn()
+    ver = _get_version(conn)
+    for target in sorted(MIGRATIONS):
+        if target <= ver:
+            continue
+        for stmt in MIGRATIONS[target]:
+            if callable(stmt):
+                stmt(conn)
+            else:
+                conn.execute(stmt)
+        _set_version(conn, target)
+        ver = target
+    return ver
+
+
 def init_db():
-    """首次启动时建表 + 种默认菜单（按 menuKey 幂等补齐）."""
+    """首次启动时建表 + 种默认菜单（按 menuKey 幂等补齐）+ 应用 schema 迁移."""
     conn = _get_conn()
     conn.executescript(SCHEMA)
+    if _get_version(conn) == 0:
+        # 老库（无 schema_meta）与新库都以基线结构起步
+        _set_version(conn, SCHEMA_VERSION)
+    migrate()
     existing = {r[0] for r in conn.execute("SELECT menuKey FROM menu_config").fetchall()}
     missing = [(uuid.uuid4().hex, k, n, g, s, 1, ic, p)
                for (k, n, g, s, ic, p) in DEFAULT_MENUS if k not in existing]
