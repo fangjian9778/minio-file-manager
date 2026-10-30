@@ -9,13 +9,13 @@ import os
 import sys
 import json
 import uuid
-import time
 import re
 import struct
 import base64
-import fnmatch
 import zipfile
 import hashlib
+import hmac
+import secrets
 import threading
 
 # AI 功能可选依赖 (requests 用于调 OpenAI 兼容 API)
@@ -27,7 +27,7 @@ except ImportError:
 from datetime import datetime
 from io import BytesIO
 
-from flask import Flask, request, jsonify, render_template, send_file, Blueprint, Response, make_response, redirect
+from flask import Flask, request, jsonify, render_template, Blueprint, Response
 from flask_cors import CORS
 from minio import Minio
 # 兼容不同版本 minio SDK 的错误类导入
@@ -146,6 +146,8 @@ def decrypt_secret(token):
 
 app = Flask(__name__)
 # MAX_CONTENT_LENGTH 将在 load_config() 之后根据 upload_size_limit 动态设置
+# 开发时改 templates/*.html 无需重启服务
+app.config["TEMPLATES_AUTO_RELOAD"] = True
 CORS(app)
 bp = Blueprint("main", __name__, url_prefix="/minio")
 
@@ -1058,7 +1060,81 @@ def health_check():
 # =================== AI 助手 ===================
 
 AI_CONFIG_FILE = os.path.join(os.path.dirname(CONFIG_FILE), ".ai_config.json")
+AI_KEY_FILE = os.path.join(os.path.dirname(CONFIG_FILE), ".ai_config.key")
 ai_config_cache = {}
+
+# ---------- AI API Key 加密存储（stdlib 实现，encrypt-then-MAC） ----------
+# 磁盘上的 api_key 字段以 "enc1$" 前缀存储；内存缓存与接口返回保持明文/脱敏。
+# 加密种子存于同目录 .ai_config.key（权限 0600），配置文件单独泄露时 key 不可解。
+_ENC_PREFIX = "enc1$"
+_ai_master_cache = [None]
+
+
+def _ai_master():
+    """读取/生成本地加密种子文件，派生 32 字节主密钥（缓存）."""
+    if _ai_master_cache[0] is not None:
+        return _ai_master_cache[0]
+    try:
+        seed = None
+        if os.path.exists(AI_KEY_FILE):
+            with open(AI_KEY_FILE, "r") as f:
+                seed = f.read().strip()
+        if not seed:
+            seed = secrets.token_hex(32)
+            fd = os.open(AI_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(seed)
+        master = hashlib.pbkdf2_hmac("sha256", seed.encode(), b"rs-ai-key-v1", 200000)
+        _ai_master_cache[0] = master
+        return master
+    except Exception:
+        return None
+
+
+def _ai_encrypt(plain):
+    """加密字符串；密钥文件不可用时返回原文（降级不阻断功能）."""
+    master = _ai_master()
+    if not master:
+        return plain
+    try:
+        salt, nonce = secrets.token_bytes(16), secrets.token_bytes(16)
+        key = hashlib.pbkdf2_hmac("sha256", master, salt, 100000)
+        enc_key, mac_key = key[:16], key[16:]
+        data = plain.encode("utf-8")
+        out = bytearray()
+        for i in range(0, len(data), 32):
+            ks = hmac.new(enc_key, nonce + i.to_bytes(4, "big"), hashlib.sha256).digest()
+            out += bytes(a ^ b for a, b in zip(data[i:i + 32], ks))
+        ct = bytes(out)
+        tag = hmac.new(mac_key, nonce + ct, hashlib.sha256).digest()
+        parts = (salt, nonce, tag, ct)
+        return _ENC_PREFIX + "$".join(base64.b64encode(p).decode() for p in parts)
+    except Exception:
+        return plain
+
+
+def _ai_decrypt(token):
+    """解密；前缀不符或校验失败返回 None."""
+    if not token.startswith(_ENC_PREFIX):
+        return None
+    master = _ai_master()
+    if not master:
+        return None
+    try:
+        salt, nonce, tag, ct = (base64.b64decode(x) for x in token[len(_ENC_PREFIX):].split("$"))
+        key = hashlib.pbkdf2_hmac("sha256", master, salt, 100000)
+        enc_key, mac_key = key[:16], key[16:]
+        expect = hmac.new(mac_key, nonce + ct, hashlib.sha256).digest()
+        if not hmac.compare_digest(tag, expect):
+            return None
+        out = bytearray()
+        for i in range(0, len(ct), 32):
+            ks = hmac.new(enc_key, nonce + i.to_bytes(4, "big"), hashlib.sha256).digest()
+            out += bytes(a ^ b for a, b in zip(ct[i:i + 32], ks))
+        return bytes(out).decode("utf-8")
+    except Exception:
+        return None
+
 
 def _load_ai_config():
     global ai_config_cache
@@ -1068,14 +1144,27 @@ def _load_ai_config():
                 ai_config_cache = json.load(f)
         except Exception:
             ai_config_cache = {}
+    # 解密磁盘上的 api_key；旧版明文格式读入后立即回写升级为加密存储
+    v = ai_config_cache.get("api_key")
+    if v and not v.startswith(_ENC_PREFIX):
+        _save_ai_config(ai_config_cache)
+    elif v and v.startswith(_ENC_PREFIX):
+        dec = _ai_decrypt(v)
+        if dec is None:
+            ai_config_cache["api_key"] = ""  # 密钥文件丢失/损坏，避免用坏值请求
+        else:
+            ai_config_cache["api_key"] = dec
     return ai_config_cache
 
 def _save_ai_config(cfg):
     global ai_config_cache
-    ai_config_cache = cfg
+    ai_config_cache = cfg  # 内存缓存保持明文
+    to_disk = dict(cfg)
+    if to_disk.get("api_key"):
+        to_disk["api_key"] = _ai_encrypt(to_disk["api_key"])
     try:
         with open(AI_CONFIG_FILE, "w") as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
+            json.dump(to_disk, f, indent=2, ensure_ascii=False)
     except Exception:
         pass
 

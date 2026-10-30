@@ -7,7 +7,6 @@ import os
 import io
 import csv
 import json
-import time
 import sqlite3
 
 from flask import Blueprint, request, jsonify, Response, send_file, abort
@@ -31,6 +30,51 @@ def _err(msg, code=400):
 
 def _now():
     return db.now_iso()
+
+
+# ---------- 本地文件路径白名单 ----------
+# 允许访问的根目录：用户主目录 + 项目目录（可用环境变量 RS_FILE_ROOTS 追加，分号分隔）
+ALLOWED_FILE_ROOTS = [
+    os.path.realpath(os.path.expanduser("~")),
+    os.path.realpath(os.path.dirname(os.path.abspath(__file__))),
+]
+_extra_roots = os.environ.get("RS_FILE_ROOTS", "")
+for _r in _extra_roots.split(";"):
+    if _r.strip():
+        ALLOWED_FILE_ROOTS.append(os.path.realpath(os.path.expanduser(_r.strip())))
+
+
+def _safe_path(fp):
+    """归一化路径并校验位于允许根目录内；不合法返回 None."""
+    if not fp:
+        return None
+    real = os.path.realpath(os.path.expanduser(fp))
+    for root in ALLOWED_FILE_ROOTS:
+        if real == root or real.startswith(root + os.sep):
+            return real
+    return None
+
+
+# ---------- URL 协议白名单 ----------
+ALLOWED_URL_SCHEMES = ("http://", "https://")
+
+def _url_error(value):
+    """校验 URL 协议白名单；合法（或空）返回 None，否则返回错误文案.
+    仅允许 http(s)，拦截 javascript:/data:/vbscript: 等危险协议.
+    """
+    u = (value or "").strip()
+    if not u:
+        return None  # 空值交由必填校验处理
+    if not u.lower().startswith(ALLOWED_URL_SCHEMES):
+        return "URL 必须以 http:// 或 https:// 开头（已拦截 javascript: 等危险协议）"
+    return None
+
+
+def _validate_url_in(data):
+    """请求体含 url 字段时做白名单校验；合法返回 None."""
+    if isinstance(data, dict) and "url" in data:
+        return _url_error(data.get("url"))
+    return None
 
 
 # ============================================================
@@ -110,8 +154,18 @@ def cat_update(cid):
 @bp.route("/category/<cid>", methods=["DELETE"])
 def cat_delete(cid):
     conn = db._get_conn()
-    # 级联删子级
-    conn.execute("DELETE FROM category WHERE id=? OR parentId=?", (cid, cid))
+    # 递归删除自身 + 全部子孙（二/三级），避免孤儿分类
+    conn.execute(
+        """
+        WITH RECURSIVE sub(id) AS (
+            SELECT ?
+            UNION
+            SELECT c.id FROM category c JOIN sub ON c.parentId = sub.id
+        )
+        DELETE FROM category WHERE id IN (SELECT id FROM sub)
+        """,
+        (cid,),
+    )
     conn.commit()
     return _ok(message="分类已删除")
 
@@ -121,7 +175,11 @@ def cat_delete(cid):
 # ============================================================
 
 def _list_resource(table, keyword_fields, extra_where="", extra_args=()):
-    """通用列表端点处理（分页 + 关键字 + 分类筛选）."""
+    """通用列表端点处理（分页 + 关键字 + 分类筛选）.
+    附加 grouped=1 时进入分组视图模式：全量返回（上限 5000）并在服务端按
+    最深分类聚合出 byCat(catId -> [id]) 与 counts(catId -> 直接条数)，
+    避免前端拉全量数据自行分组.
+    """
     page = request.args.get("page", 1, type=int)
     page_size = min(request.args.get("pageSize", 20, type=int), 1000)
     keyword = request.args.get("keyword", "").strip()
@@ -135,18 +193,47 @@ def _list_resource(table, keyword_fields, extra_where="", extra_args=()):
         if cid:
             clauses.append(f"{f}=?")
             args.append(cid)
+    if keyword and keyword_fields:
+        like = " OR ".join(f"{f} LIKE ?" for f in keyword_fields)
+        clauses.append("(" + like + ")")
+        for kw in keyword.split():
+            args.extend(["%" + kw + "%"] * len(keyword_fields))
     where_sql = " AND ".join(clauses)
+    where_clause = ("WHERE " + where_sql) if where_sql else ""
 
     conn = db._get_conn()
+
+    # ---- 分组视图：服务端聚合 ----
+    if request.args.get("grouped") == "1":
+        cat_mode = request.args.get("catMode", "three")
+        cap = 5000
+        rows = db._rows_to_list(conn.execute(
+            f"SELECT * FROM {table} {where_clause} ORDER BY createdAt DESC LIMIT ?",
+            tuple(args) + (cap,)
+        ).fetchall())
+        by_cat, counts = {}, {}
+        for r in rows:
+            if cat_mode == "single":
+                key = r.get("categoryId") or ""
+            else:
+                key = r.get("categoryId3") or r.get("categoryId2") or r.get("categoryId1") or ""
+            by_cat.setdefault(key, []).append(r["id"])
+            counts[key] = counts.get(key, 0) + 1
+        return _ok({"total": len(rows), "rows": rows, "byCat": by_cat, "counts": counts,
+                    "truncated": (len(rows) >= cap)})
+
     p = db.paginate(conn, table, where=where_sql, params=tuple(args),
                    page=page, page_size=page_size,
-                   keyword_fields=keyword_fields, keyword=keyword)
+                   keyword_fields=keyword_fields, keyword="")
     return _ok(p)
 
 
 def _create_resource(table, fields, unique_field=None):
     """通用单条创建. fields: list of (col, json_key, required, default)."""
     data = request.get_json(silent=True) or {}
+    url_err = _validate_url_in(data)
+    if url_err:
+        return _err(url_err)
     col_list, val_list = ["id", "createdAt", "updatedAt"], [db.gen_id(), _now(), _now()]
     for col, key, required, default in fields:
         v = data.get(key, default)
@@ -169,6 +256,9 @@ def _create_resource(table, fields, unique_field=None):
 def _update_resource(table, rid, fields):
     """通用单条/批量更新. fields: list of (col, json_key)."""
     data = request.get_json(silent=True) or {}
+    url_err = _validate_url_in(data)
+    if url_err:
+        return _err(url_err)
     ids = [rid] if rid else (data.get("ids") or [])
     if not ids:
         return _err("id(s) 必填")
@@ -235,7 +325,6 @@ def url_batch_create():
         return _err("items 不能为空")
     if len(items) > MAX_BATCH:
         return _err(f"单次最多 {MAX_BATCH} 条")
-    conn = db._get_conn()
     success, fail, details = 0, 0, []
     with db.tx() as tx:
         for it in items:
@@ -247,6 +336,9 @@ def url_batch_create():
                     if req and not v:
                         raise ValueError(f"{key} 必填")
                     vals.append(v)
+                uerr = _url_error(it.get("url"))
+                if uerr:
+                    raise ValueError(uerr)
                 tx.execute(f"INSERT INTO url_item({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})", vals)
                 success += 1
             except Exception as e:
@@ -300,7 +392,6 @@ def online_doc_batch():
     items = data.get("items") or []
     if len(items) > MAX_BATCH:
         return _err(f"单次最多 {MAX_BATCH} 条")
-    conn = db._get_conn()
     success, fail, details = 0, 0, []
     with db.tx() as tx:
         for it in items:
@@ -312,6 +403,9 @@ def online_doc_batch():
                     if req and not v:
                         raise ValueError(f"{key} 必填")
                     vals.append(v)
+                uerr = _url_error(it.get("url"))
+                if uerr:
+                    raise ValueError(uerr)
                 tx.execute(f"INSERT INTO online_doc({','.join(cols)}) VALUES ({','.join(['?']*len(cols))})", vals)
                 success += 1
             except Exception as e:
@@ -436,7 +530,7 @@ def local_doc_delete_one(rid):
     row = conn.execute("SELECT filePath FROM local_doc WHERE id=?", (rid,)).fetchone()
     conn.execute("DELETE FROM local_doc WHERE id=?", (rid,))
     conn.commit()
-    if del_file and row and os.path.isfile(row["filePath"]):
+    if del_file and row and _safe_path(row["filePath"]) and os.path.isfile(row["filePath"]):
         try:
             os.remove(row["filePath"])
         except Exception:
@@ -458,7 +552,7 @@ def local_doc_batch_delete():
     if del_file:
         for r in rows:
             try:
-                if os.path.isfile(r["filePath"]):
+                if _safe_path(r["filePath"]) and os.path.isfile(r["filePath"]):
                     os.remove(r["filePath"])
             except Exception:
                 pass
@@ -471,7 +565,9 @@ def local_doc_preview(rid):
     row = conn.execute("SELECT * FROM local_doc WHERE id=?", (rid,)).fetchone()
     if not row:
         return _err("记录不存在", 404)
-    fp = row["filePath"]
+    fp = _safe_path(row["filePath"])
+    if not fp:
+        return _err("文件路径不在允许的目录内: " + row["filePath"], 403)
     if not os.path.isfile(fp):
         return _err(f"文件不存在: {fp}", 404)
     # 文本/MD/图片 直接返回，其他返回元信息
@@ -502,9 +598,10 @@ def local_doc_preview(rid):
 def local_doc_download(rid):
     conn = db._get_conn()
     row = conn.execute("SELECT * FROM local_doc WHERE id=?", (rid,)).fetchone()
-    if not row or not os.path.isfile(row["filePath"]):
+    fp = _safe_path(row["filePath"]) if row else None
+    if not fp or not os.path.isfile(fp):
         abort(404)
-    return send_file(row["filePath"], as_attachment=True)
+    return send_file(fp, as_attachment=True)
 
 
 # ============================================================
@@ -576,7 +673,9 @@ def md_read(rid):
     row = conn.execute("SELECT * FROM md_file WHERE id=?", (rid,)).fetchone()
     if not row:
         return _err("记录不存在", 404)
-    fp = row["filePath"]
+    fp = _safe_path(row["filePath"])
+    if not fp:
+        return _err("文件路径不在允许的目录内: " + row["filePath"], 403)
     if not os.path.isfile(fp):
         return _err(f"文件不存在: {fp}", 404)
     with open(fp, "r", encoding="utf-8", errors="replace") as f:
@@ -591,7 +690,9 @@ def md_page(rid):
     row = conn.execute("SELECT * FROM md_file WHERE id=?", (rid,)).fetchone()
     if not row:
         return _err("记录不存在", 404)
-    fp = row["filePath"]
+    fp = _safe_path(row["filePath"])
+    if not fp:
+        return _err("文件路径不在允许的目录内: " + row["filePath"], 403)
     if not os.path.isfile(fp):
         return _err(f"文件不存在: {fp}", 404)
     with open(fp, "r", encoding="utf-8", errors="replace") as f:
@@ -625,7 +726,7 @@ def md_delete_one(rid):
     row = conn.execute("SELECT filePath FROM md_file WHERE id=?", (rid,)).fetchone()
     conn.execute("DELETE FROM md_file WHERE id=?", (rid,))
     conn.commit()
-    if del_file and row and os.path.isfile(row["filePath"]):
+    if del_file and row and _safe_path(row["filePath"]) and os.path.isfile(row["filePath"]):
         try:
             os.remove(row["filePath"])
         except Exception:
@@ -647,7 +748,7 @@ def md_batch_delete():
     if del_file:
         for r in rows:
             try:
-                if os.path.isfile(r["filePath"]):
+                if _safe_path(r["filePath"]) and os.path.isfile(r["filePath"]):
                     os.remove(r["filePath"])
             except Exception:
                 pass
@@ -662,14 +763,84 @@ def md_save(rid):
     row = conn.execute("SELECT * FROM md_file WHERE id=?", (rid,)).fetchone()
     if not row:
         return _err("记录不存在", 404)
+    fp = _safe_path(row["filePath"])
+    if not fp:
+        return _err("文件路径不在允许的目录内: " + row["filePath"], 403)
     try:
-        with open(row["filePath"], "w", encoding="utf-8") as f:
+        with open(fp, "w", encoding="utf-8") as f:
             f.write(content)
         conn.execute("UPDATE md_file SET updatedAt=? WHERE id=?", (_now(), rid))
         conn.commit()
     except Exception as e:
         return _err("保存失败: " + str(e))
     return _ok(message="已保存")
+
+
+# ============================================================
+# 需求 1: 内置浏览器 —— X-Frame-Options / CSP frame-ancestors 探测
+# ============================================================
+
+@bp.route("/browser/probe", methods=["GET"])
+def browser_probe():
+    """探测目标 URL 是否允许被 iframe 嵌入.
+    返回 {frameable: true/false/null, reason: str}；探测失败时 frameable=null（前端不拦截）.
+    """
+    url = (request.args.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return _ok(frameable=None, reason="非 http(s) 地址，跳过探测")
+    import urllib.request
+    import urllib.error
+
+    def _probe(u, method):
+        """按环境代理探测；代理不可用时自动降级为直连."""
+        headers = {"User-Agent": "Mozilla/5.0"}
+        try:
+            req = urllib.request.Request(u, method=method, headers=headers)
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.headers
+        except urllib.error.HTTPError as e:
+            # 4xx/5xx 响应也带目标站的头，照样取用
+            return e.headers
+        except urllib.error.URLError:
+            # 代理异常等场景，绕过代理重试一次（必须新建 Request，
+            # 失败过的 Request 内部状态会被污染）
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            req2 = urllib.request.Request(u, method=method, headers=headers)
+            try:
+                with opener.open(req2, timeout=5) as resp:
+                    return resp.headers
+            except urllib.error.HTTPError as e2:
+                return e2.headers
+            except Exception:
+                raise
+
+    try:
+        headers = _probe(url, "HEAD")
+        xfo = headers.get("X-Frame-Options", "") or ""
+        csp = headers.get("Content-Security-Policy", "") or ""
+        if not xfo and not csp:
+            # 某些站点对 HEAD 不返回头，GET 再取一次
+            headers = _probe(url, "GET")
+            xfo = headers.get("X-Frame-Options", "") or ""
+            csp = headers.get("Content-Security-Policy", "") or ""
+    except Exception:
+        return _ok(frameable=None, reason="探测失败（网络错误）")
+
+    if xfo:
+        v = xfo.strip().lower()
+        if v == "deny":
+            return _ok(frameable=False, reason="站点设置 X-Frame-Options: DENY，禁止任何页面嵌入")
+        if v == "sameorigin":
+            return _ok(frameable=False, reason="站点设置 X-Frame-Options: SAMEORIGIN，仅允许同源页面嵌入")
+    for part in csp.split(";"):
+        p = part.strip().lower()
+        if p.startswith("frame-ancestors"):
+            targets = p.split(None, 1)[1].strip() if " " in p else ""
+            if targets == "'none'" or ("'self'" in targets and "*" not in targets):
+                return _ok(frameable=False, reason="站点 CSP frame-ancestors 限制了外部嵌入")
+            # 含 * 或具体来源列表：无法确认本页是否在白名单，交由浏览器实际渲染决定
+            break
+    return _ok(frameable=True, reason="未发现嵌入限制")
 
 
 # ============================================================
@@ -794,7 +965,6 @@ def ai_preset_create():
     example = data.get("exampleOutput", "")
     enabled = int(bool(data.get("enabled", True)))
     is_default = int(bool(data.get("isDefault", False)))
-    conn = db._get_conn()
     try:
         with db.tx() as tx:
             if is_default:
@@ -923,7 +1093,6 @@ def batch_import(module):
         success, fail, details = 0, 0, []
         for it in items:
             try:
-                from flask import Request as _R
                 # 直接走底层 DB（绕过 request 上下文）
                 name = (it.get("name") or "").strip()
                 fp = it.get("formatPrompt") or ""
@@ -947,7 +1116,6 @@ def batch_import(module):
 
     # 其他模块走 batch 接口的底层逻辑：直接调 Flask test client 会破坏上下文，这里直接复用 db 层
     # 简单做法：构造一个临时 request body 然后手动调函数
-    import flask
     # 把 items 塞进模拟的 request 对象（复用函数签名）
     # 由于函数内部直接用 Flask request，需要临时替换. 这里用 test client 更简洁.
     from minio_server import app
@@ -971,6 +1139,9 @@ def browser_open():
     url = (data.get("url") or "").strip()
     if not url:
         return _err("url 必填")
+    low = url.lower()
+    if low.startswith(("javascript:", "data:", "vbscript:")):
+        return _err("已拦截危险协议（javascript:/data:/vbscript:）")
     # 简单的验证
     if not url.startswith(("http://", "https://", "file://")):
         url = "https://" + url
