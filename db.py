@@ -8,6 +8,9 @@ import sqlite3
 import json
 import time
 import uuid
+import hmac
+import hashlib
+import secrets
 import threading
 from contextlib import contextmanager
 
@@ -150,6 +153,22 @@ CREATE TABLE IF NOT EXISTS batch_log (
     detail        TEXT DEFAULT '{}',          -- JSON
     createdAt     TEXT DEFAULT (datetime('now','localtime'))
 );
+
+CREATE TABLE IF NOT EXISTS users (
+    id           TEXT PRIMARY KEY,
+    username     TEXT NOT NULL UNIQUE,
+    passwordHash TEXT NOT NULL,
+    salt         TEXT NOT NULL,
+    createdAt    TEXT DEFAULT (datetime('now','localtime')),
+    updatedAt    TEXT DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS auth_token (
+    token     TEXT PRIMARY KEY,
+    username  TEXT NOT NULL,
+    expireAt  INTEGER NOT NULL,               -- unix timestamp, 24h 后过期
+    createdAt TEXT DEFAULT (datetime('now','localtime'))
+);
 """
 
 # 菜单默认种子（需求 8 分组结构）
@@ -176,14 +195,27 @@ DEFAULT_MENUS = [
 #   - 新装库：executescript(SCHEMA) 直接建最新结构，版本记为 SCHEMA_VERSION；
 #   - 已有库：不要改旧版本的 SCHEMA 语句，把新 DDL 放进 MIGRATIONS[新版本号]，
 #     init_db 时按版本从旧到新顺序补执行（ALTER TABLE 用 IF NOT EXISTS 不可用，需保证幂等由迁移函数负责）。
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # 版本号 -> SQL 语句列表 或 callable(conn)
-# 示例：
-# MIGRATIONS = {
-#     2: ["ALTER TABLE url_item ADD COLUMN favicon TEXT DEFAULT ''"],
-# }
-MIGRATIONS = {}
+MIGRATIONS = {
+    2: [
+        "CREATE TABLE IF NOT EXISTS users ("
+        " id TEXT PRIMARY KEY,"
+        " username TEXT NOT NULL UNIQUE,"
+        " passwordHash TEXT NOT NULL,"
+        " salt TEXT NOT NULL,"
+        " createdAt TEXT DEFAULT (datetime('now','localtime')),"
+        " updatedAt TEXT DEFAULT (datetime('now','localtime'))"
+        ")",
+        "CREATE TABLE IF NOT EXISTS auth_token ("
+        " token TEXT PRIMARY KEY,"
+        " username TEXT NOT NULL,"
+        " expireAt INTEGER NOT NULL,"
+        " createdAt TEXT DEFAULT (datetime('now','localtime'))"
+        ")",
+    ],
+}
 
 
 def _get_version(conn):
@@ -239,8 +271,28 @@ def init_db():
         )
     # 迁移：旧数据 menu_minio 指向不存在的 'files' 面板
     conn.execute("UPDATE menu_config SET panel='upload' WHERE menuKey='menu_minio' AND panel='files'")
+    # 幂等种子：默认账号 admin/admin123（登录后可在设置中修改）
+    if not conn.execute("SELECT 1 FROM users LIMIT 1").fetchone():
+        salt, pw_hash = hash_password("admin123")
+        conn.execute(
+            "INSERT INTO users(id, username, passwordHash, salt) VALUES (?,?,?,?)",
+            (gen_id(), "admin", pw_hash, salt)
+        )
     conn.commit()
     return DB_FILE
+
+
+# ---------- 密码哈希（PBKDF2-SHA256, 无第三方依赖） ----------
+def hash_password(password, salt=None):
+    salt = salt or secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac("sha256", str(password).encode("utf-8"),
+                             salt.encode("utf-8"), 100_000)
+    return salt, dk.hex()
+
+
+def verify_password(password, salt, expected):
+    _, dk = hash_password(password, salt)
+    return hmac.compare_digest(dk, expected)
 
 
 # ---------- 通用 CRUD ----------

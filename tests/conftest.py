@@ -24,4 +24,8 @@ def app():
 
 @pytest.fixture()
 def client(app):
-    return app.test_client()
+    c = app.test_client()
+    # 登录保护：所有 /rs、/minio/api 请求需有效 token，测试统一先登录
+    r = c.post("/rs/auth/login", json={"username": "admin", "password": "admin123"})
+    assert r.status_code == 200, f"测试登录失败: {r.get_json()}"
+    return c

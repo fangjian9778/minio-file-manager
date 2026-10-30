@@ -322,6 +322,15 @@
             padding: 12px 24px;
             border-bottom: 1px solid var(--card-border);
             flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        .main-header .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
         }
         .main-header h2 {
             font-size: 1.1rem;
@@ -1148,3 +1157,66 @@
             white-space: nowrap;
         }
         .more-menu button:hover { background: var(--sidebar-hover); color: var(--primary); }
+
+        /* =================== 登录页 =================== */
+        .login-overlay {
+            position: fixed;
+            inset: 0;
+            background: var(--bg);
+            background-image: radial-gradient(circle at 30% 20%, var(--primary-glow), transparent 55%),
+                              radial-gradient(circle at 75% 80%, rgba(124, 77, 255, 0.12), transparent 55%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+        }
+        .login-card {
+            width: 340px;
+            max-width: calc(100vw - 40px);
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 10px;
+            box-shadow: var(--shadow-glow);
+            backdrop-filter: blur(14px);
+            padding: 32px 28px 28px;
+            text-align: center;
+        }
+        .login-logo {
+            width: 64px;
+            height: 64px;
+            border-radius: 14px;
+            object-fit: cover;
+            box-shadow: 0 4px 16px var(--primary-glow);
+        }
+        .login-title {
+            margin-top: 14px;
+            font-size: 1.15rem;
+            color: var(--primary);
+            letter-spacing: 2px;
+        }
+        .login-sub {
+            margin-top: 6px;
+            font-size: .75rem;
+            color: var(--text-light);
+            margin-bottom: 18px;
+        }
+        .login-card .form-group { text-align: left; margin-bottom: 12px; }
+        .login-error {
+            min-height: 18px;
+            font-size: .75rem;
+            color: var(--danger);
+            margin-bottom: 8px;
+            text-align: left;
+        }
+        .login-btn { width: 100%; padding: 10px 0; font-size: .95rem; letter-spacing: 4px; }
+
+        /* 账号安全卡片 */
+        .account-name {
+            margin-left: auto;
+            font-size: .75rem;
+            font-weight: 400;
+            color: var(--text-secondary);
+            letter-spacing: 0;
+        }
+        /* header 主题按钮 */
+        .main-header .theme-toggle { width: 30px; height: 30px; }

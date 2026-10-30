@@ -71,6 +71,10 @@
             if (xhr.readyState === 4) {
                 try {
                     var resp = JSON.parse(xhr.responseText);
+                    if (xhr.status === 401 && fullUrl.indexOf('/rs/auth/login') !== 0) {
+                        // token 缺失/过期 → 弹出登录页
+                        showLoginOverlay('登录已过期，请重新登录');
+                    }
                     if (xhr.status >= 400) {
                         callback(resp.error || ('HTTP ' + xhr.status), null);
                     } else if (isRs) {
@@ -2676,21 +2680,108 @@
         });
     }
 
-    // =================== 初始化 ===================
-    setTimeout(function() {
-        loadAndRenderMenu();
-        loadAiPresets();
-        setTimeout(function() {
-            // 初始加载各模块（在其 panel 显示时才加载）
-            ['url','online-doc','local-doc','md','ai-preset'].forEach(function(n) {
-                if (crudModules[n]) {
-                    // 预加载第一页 + 初始化分类筛选
-                    if (crudModules[n]._cfg && crudModules[n]._cfg.catModule) initCatFilter(n);
-                    crudModules[n].load();
-                }
+    // =================== 登录认证 ===================
+    var appStarted = false;
+
+    function showLoginOverlay(msg) {
+        var ov = document.getElementById('loginOverlay');
+        if (ov) ov.style.display = 'flex';
+        var err = document.getElementById('loginError');
+        if (err) err.textContent = msg || '';
+    }
+
+    function hideLoginOverlay() {
+        var ov = document.getElementById('loginOverlay');
+        if (ov) ov.style.display = 'none';
+        var err = document.getElementById('loginError');
+        if (err) err.textContent = '';
+    }
+
+    function doLogin() {
+        var u = (document.getElementById('loginUsername').value || '').trim();
+        var p = document.getElementById('loginPassword').value || '';
+        var errBox = document.getElementById('loginError');
+        if (!u || !p) { errBox.textContent = '请输入账号和密码'; return; }
+        var btn = document.getElementById('loginBtn');
+        btn.disabled = true; btn.textContent = '登录中...';
+        apiRequest('POST', '/rs/auth/login', { username: u, password: p }, function(err, resp) {
+            btn.disabled = false; btn.textContent = '登 录';
+            if (err) { errBox.textContent = err; return; }
+            document.getElementById('loginPassword').value = '';
+            hideLoginOverlay();
+            setCurrentAccount(resp && resp.username);
+            startApp();
+        });
+    }
+
+    function doLogout() {
+        apiRequest('POST', '/rs/auth/logout', null, function() {
+            location.reload();
+        });
+    }
+
+    function setCurrentAccount(name) {
+        var el = document.getElementById('currentAccount');
+        if (el && name) el.textContent = name;
+    }
+
+    function changeAccount() {
+        var oldP = document.getElementById('oldPassword').value || '';
+        var newU = (document.getElementById('newUsername').value || '').trim();
+        var newP = document.getElementById('newPassword').value || '';
+        var confP = document.getElementById('confirmPassword').value || '';
+        if (!oldP || !newP) { showToast('error', '当前密码和新密码必填'); return; }
+        if (newP.length < 6) { showToast('error', '新密码至少 6 位'); return; }
+        if (newP !== confP) { showToast('error', '两次输入的新密码不一致'); return; }
+        apiRequest('POST', '/rs/auth/change-password',
+            { oldPassword: oldP, newPassword: newP, newUsername: newU },
+            function(err, resp) {
+                if (err) { showToast('error', '修改失败: ' + err); return; }
+                ['oldPassword', 'newPassword', 'confirmPassword', 'newUsername'].forEach(function(id) {
+                    document.getElementById(id).value = '';
+                });
+                setCurrentAccount(resp && resp.username);
+                showToast('success', resp.message || '账号密码修改成功');
             });
-        }, 500);
-    }, 300);
+    }
+    // Enter 登录
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && document.getElementById('loginOverlay').style.display !== 'none') {
+            doLogin();
+        }
+    });
+
+    // =================== 初始化 ===================
+    function startApp() {
+        if (appStarted) return;
+        appStarted = true;
+        setTimeout(function() {
+            loadAndRenderMenu();
+            loadAiPresets();
+            setTimeout(function() {
+                // 初始加载各模块（在其 panel 显示时才加载）
+                ['url','online-doc','local-doc','md','ai-preset'].forEach(function(n) {
+                    if (crudModules[n]) {
+                        // 预加载第一页 + 初始化分类筛选
+                        if (crudModules[n]._cfg && crudModules[n]._cfg.catModule) initCatFilter(n);
+                        crudModules[n].load();
+                    }
+                });
+            }, 500);
+        }, 300);
+    }
+
+    // 启动门槛：先校验登录态（cookie token 24h 有效），未登录只显示登录页
+    (function() {
+        var ov = document.getElementById('loginOverlay');
+        if (ov) ov.style.display = 'flex';
+        apiRequest('GET', '/rs/auth/check', null, function(err, resp) {
+            if (err) { showLoginOverlay(''); return; }
+            hideLoginOverlay();
+            setCurrentAccount(resp && resp.username);
+            startApp();
+        });
+    })();
 
     // 辅助 escape
     function escapeAttr(s) {

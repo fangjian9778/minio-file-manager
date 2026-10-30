@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>项目管理工具</title>
-    <link rel="stylesheet" href="/static/css/index.css?v=20261030">
+    <link rel="icon" type="image/jpeg" href="/static/img/app_icon.jpg?v=20261030">
+    <link rel="stylesheet" href="/static/css/index.css?v=20261030b">
     <!-- 同步应用保存的主题, 避免首屏闪烁 -->
     <script>
         (function(){
@@ -20,36 +21,13 @@
         <button class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()" title="展开">&#10095;</button>
         <div class="sidebar-logo">
             <div class="logo-icon">
-                <svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
-                    <defs>
-                        <linearGradient id="cloudGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" style="stop-color:var(--primary)"/>
-                            <stop offset="100%" style="stop-color:var(--neon-purple)"/>
-                        </linearGradient>
-                    </defs>
-                    <!-- 云朵轮廓 -->
-                    <path fill="url(#cloudGrad)" d="M22 22H10a7 7 0 0 1-.6-13.97 8 8 0 0 1 15.2 1.47A5.5 5.5 0 0 1 22 22z"/>
-                    <!-- MINIO 文字 -->
-                    <text x="16" y="18.5" text-anchor="middle" dominant-baseline="middle"
-                          font-family="'Segoe UI', Arial, sans-serif"
-                          font-size="7.5" font-weight="900" fill="#fff"
-                          letter-spacing="-0.3">M</text>
-                </svg>
+                <img src="/static/img/app_icon.jpg?v=20261030" alt="logo" style="width:100%;height:100%;object-fit:cover;border-radius:7px;">
             </div>
             <span class="logo-text">项目管理工具</span>
         </div>
         <nav class="sidebar-nav" id="sidebarNav">
             <!-- 由 JS 动态渲染（/rs/menu/list） -->
         </nav>
-        <div class="sidebar-footer">
-            <div class="status-badge">
-                <span class="status-dot" id="statusDot"></span>
-                <span class="status-label" id="statusText">未连接</span>
-            </div>
-            <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="切换主题">
-                <span class="theme-icon" id="themeIcon">&#9788;</span>
-            </button>
-        </div>
     </div>
 
     <!-- Main Content -->
@@ -57,6 +35,11 @@
         <!-- Header -->
         <div class="main-header">
             <h2 id="pageTitle">连接配置</h2>
+            <div class="header-actions">
+                <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="切换主题">
+                    <span class="theme-icon" id="themeIcon">&#9788;</span>
+                </button>
+            </div>
         </div>
 
         <!-- Content Area -->
@@ -69,7 +52,12 @@
             <!-- Config Panel -->
             <div class="panel active" id="panel-config">
                 <div class="card">
-                    <div class="card-title"><span class="icon">&#9881;</span> MinIO 连接设置</div>
+                    <div class="card-title"><span class="icon">&#9881;</span> MinIO 连接设置
+                        <span class="status-badge" style="margin-left:auto">
+                            <span class="status-dot" id="statusDot"></span>
+                            <span class="status-label" id="statusText" style="opacity:1">未连接</span>
+                        </span>
+                    </div>
                     <div class="form-group">
                         <label>服务器地址 (含端口和路径)</label>
                         <input type="text" class="form-control" id="serverAddress" placeholder="例: 10.204.184.236:8109/minio-api/">
@@ -138,6 +126,35 @@
                         <button class="btn btn-primary" onclick="saveAiConfig()">保存配置</button>
                         <button class="btn btn-outline" onclick="testAiConfig()">🧪 测试连接</button>
                     </div>
+                </div>
+                <!-- 账号安全（登录账号密码修改） -->
+                <div class="card" id="accountCard">
+                    <div class="card-title"><span class="icon">&#128100;</span> 账号安全
+                        <span class="account-name">当前账号: <b id="currentAccount">-</b></span>
+                    </div>
+                    <div class="form-group">
+                        <label>新账号名（留空则不修改）</label>
+                        <input type="text" class="form-control" id="newUsername" placeholder="留空保持原账号">
+                    </div>
+                    <div class="form-group">
+                        <label>当前密码</label>
+                        <input type="password" class="form-control" id="oldPassword" placeholder="输入当前密码" autocomplete="current-password">
+                    </div>
+                    <div class="form-row" style="gap:12px">
+                        <div class="form-col" style="flex:1">
+                            <label>新密码</label>
+                            <input type="password" class="form-control" id="newPassword" placeholder="至少 6 位" autocomplete="new-password">
+                        </div>
+                        <div class="form-col" style="flex:1">
+                            <label>确认新密码</label>
+                            <input type="password" class="form-control" id="confirmPassword" placeholder="再次输入新密码" autocomplete="new-password">
+                        </div>
+                    </div>
+                    <div class="btn-group">
+                        <button class="btn btn-primary" onclick="changeAccount()">保存账号密码</button>
+                        <button class="btn btn-outline" onclick="doLogout()">退出登录</button>
+                    </div>
+                    <div class="form-hint">登录状态 24 小时有效，过期后需重新登录</div>
                 </div>
             </div>
 
@@ -614,6 +631,23 @@
     <!-- Toast Container -->
     <div class="toast-container" id="toastContainer"></div>
 
-    <script src="/static/js/index.js?v=20261030"></script>
+    <!-- 登录页 -->
+    <div class="login-overlay" id="loginOverlay">
+        <div class="login-card">
+            <img class="login-logo" src="/static/img/app_icon.jpg?v=20261030" alt="logo">
+            <h3 class="login-title">项目管理工具</h3>
+            <p class="login-sub">登录后使用，登录状态 24 小时有效</p>
+            <div class="form-group">
+                <input type="text" class="form-control" id="loginUsername" placeholder="账号" autocomplete="username" autofocus>
+            </div>
+            <div class="form-group">
+                <input type="password" class="form-control" id="loginPassword" placeholder="密码" autocomplete="current-password">
+            </div>
+            <div class="login-error" id="loginError"></div>
+            <button class="btn btn-primary login-btn" id="loginBtn" onclick="doLogin()">登 录</button>
+        </div>
+    </div>
+
+    <script src="/static/js/index.js?v=20261030b"></script>
 </body>
 </html>

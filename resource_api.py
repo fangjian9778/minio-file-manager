@@ -1150,6 +1150,140 @@ def browser_open():
     return _ok({"url": url, "action": "open"})
 
 
+# ============================================================
+# 登录认证（需求: 登录页 + token 24h 过期 + 账号密码可修改）
+# ============================================================
+import time as _time
+import secrets as _secrets
+
+AUTH_COOKIE = "rs_token"
+TOKEN_TTL = 24 * 3600  # 24 小时
+
+
+def _set_auth_cookie(resp, token):
+    resp.set_cookie(AUTH_COOKIE, token, max_age=TOKEN_TTL,
+                    httponly=True, samesite="Lax", path="/")
+
+
+def _create_token(username):
+    token = _secrets.token_hex(32)
+    conn = db._get_conn()
+    # 顺带清理过期 token
+    now = int(_time.time())
+    conn.execute("DELETE FROM auth_token WHERE expireAt < ?", (now,))
+    conn.execute(
+        "INSERT INTO auth_token(token, username, expireAt) VALUES (?,?,?)",
+        (token, username, now + TOKEN_TTL)
+    )
+    conn.commit()
+    return token
+
+
+def _token_user():
+    """从 cookie 取 token 并校验有效期；无效返回 None."""
+    token = request.cookies.get(AUTH_COOKIE, "")
+    if not token:
+        return None
+    conn = db._get_conn()
+    row = conn.execute(
+        "SELECT username, expireAt FROM auth_token WHERE token=?", (token,)
+    ).fetchone()
+    if not row:
+        return None
+    if int(row["expireAt"]) < int(_time.time()):
+        conn.execute("DELETE FROM auth_token WHERE token=?", (token,))
+        conn.commit()
+        return None
+    return row["username"]
+
+
+@bp.route("/auth/login", methods=["POST"])
+def auth_login():
+    data = request.get_json(silent=True) or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    if not username or not password:
+        return _err("账号和密码必填")
+    conn = db._get_conn()
+    user = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+    if not user or not db.verify_password(password, user["salt"], user["passwordHash"]):
+        return _err("账号或密码错误", 401)
+    token = _create_token(username)
+    resp = _ok({"username": username, "expireIn": TOKEN_TTL})
+    _set_auth_cookie(resp, token)
+    return resp
+
+
+@bp.route("/auth/logout", methods=["POST"])
+def auth_logout():
+    token = request.cookies.get(AUTH_COOKIE, "")
+    conn = db._get_conn()
+    if token:
+        conn.execute("DELETE FROM auth_token WHERE token=?", (token,))
+        conn.commit()
+    resp = _ok({"loggedOut": True})
+    resp.delete_cookie(AUTH_COOKIE, path="/")
+    return resp
+
+
+@bp.route("/auth/check", methods=["GET"])
+def auth_check():
+    username = _token_user()
+    if not username:
+        return _err("未登录或登录已过期", 401)
+    return _ok({"username": username, "loggedIn": True})
+
+
+@bp.route("/auth/change-password", methods=["POST"])
+def auth_change_password():
+    """修改账号密码. body: {oldPassword, newPassword, newUsername?}"""
+    username = _token_user()
+    if not username:
+        return _err("未登录或登录已过期", 401)
+    data = request.get_json(silent=True) or {}
+    old_password = data.get("oldPassword") or ""
+    new_password = data.get("newPassword") or ""
+    new_username = (data.get("newUsername") or "").strip()
+    if not old_password or not new_password:
+        return _err("当前密码和新密码必填")
+    if len(new_password) < 6:
+        return _err("新密码至少 6 位")
+    conn = db._get_conn()
+    user = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+    if not user or not db.verify_password(old_password, user["salt"], user["passwordHash"]):
+        return _err("当前密码错误", 403)
+    target = new_username or username
+    if new_username and new_username != username:
+        dup = conn.execute("SELECT 1 FROM users WHERE username=? AND id<>?",
+                           (new_username, user["id"])).fetchone()
+        if dup:
+            return _err("账号名已存在")
+    salt, pw_hash = db.hash_password(new_password)
+    conn.execute(
+        "UPDATE users SET username=?, passwordHash=?, salt=?, "
+        "updatedAt=datetime('now','localtime') WHERE id=?",
+        (target, pw_hash, salt, user["id"])
+    )
+    # 账号变更时同步当前 token 用户名
+    token = request.cookies.get(AUTH_COOKIE, "")
+    if token:
+        conn.execute("UPDATE auth_token SET username=? WHERE token=?", (target, token))
+    conn.commit()
+    return _ok({"username": target}, message="账号密码修改成功")
+
+
 # ---------- 注册 ----------
 def register_module_blueprint(app):
     app.register_blueprint(bp)
+
+    # ---- 登录保护：除白名单外的接口一律要求有效 token ----
+    AUTH_WHITELIST = ("/static", "/rs/auth/login", "/favicon")
+
+    @app.before_request
+    def _require_login():
+        path = request.path
+        if path == "/" or path.startswith(AUTH_WHITELIST):
+            return None
+        if not _token_user():
+            return jsonify({"ok": False, "error": "未登录或登录已过期"}), 401
+        return None
