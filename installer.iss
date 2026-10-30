@@ -5,12 +5,12 @@
 ; 编译命令(Windows): "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 ; ============================================================================
 
-#define MyAppName "MINIO 文件管理"
+#define MyAppName "项目管理工具"
 #define MyAppVersion "1.0.0"
 #define MyAppExeName "minio_file_manager.exe"
-#define MyAppPublisher "MinIO File Manager"
+#define MyAppPublisher "项目管理工具"
 #define MyAppURL "https://github.com/fangjian9778/minio-file"
-#define MyAppDescription "MINIO 对象存储文件管理工具 - 支持文件上传下载、桶管理"
+#define MyAppDescription "项目管理工具 - 支持文件上传下载、桶管理、资源管理"
 
 [Setup]
 ; 应用唯一标识 (卸载时用于识别, 请勿随意修改)
@@ -22,13 +22,13 @@ AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 AppComments={#MyAppDescription}
 ; 默认安装目录: 32位系统装到 Program Files, 64位系统装到 Program Files (x86)
-DefaultDirName={autopf}\MINIOFileManager
+DefaultDirName={autopf}\ProjectManagerTool
 ; 默认开始菜单组
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 ; 输出配置
 OutputDir=installer
-OutputBaseFilename=MINIO文件管理_Setup_{#MyAppVersion}
+OutputBaseFilename=项目管理工具_Setup_{#MyAppVersion}
 ; 压缩设置
 Compression=lzma2
 SolidCompression=yes

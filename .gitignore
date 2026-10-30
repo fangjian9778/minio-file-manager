@@ -21,6 +21,8 @@ Thumbs.db
 
 # Config with secrets
 .minio_config.json
+.ai_config.json
+.ai_config.key
 
 # Test/diagnostic files
 *_diag*.py
@@ -30,3 +32,15 @@ e2e_test.py
 GUIDE.md
 python2.7/
 .resource_manager.db
+.resource_manager.db-shm
+.resource_manager.db-wal
+
+# Test/lint caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Tool artifacts
+.screenshots/
+.trae-html-share-packages/
