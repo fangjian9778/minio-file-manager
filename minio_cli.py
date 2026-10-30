@@ -17,16 +17,13 @@ import json
 import re
 import hmac
 import hashlib
-import base64
 import fnmatch
 import cmd
-import time
 import argparse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from urllib.parse import quote, urlencode
-from urllib.request import (Request, urlopen, HTTPSHandler, HTTPHandler,
-                            build_opener, install_opener)
+from urllib.request import (Request, urlopen)
 from urllib.error import HTTPError, URLError
 
 # ========= 敏感词过滤 =========

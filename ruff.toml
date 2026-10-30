@@ -1,0 +1,19 @@
+# ruff 配置 —— 面向存量代码的高信号规则门禁
+target-version = "py39"
+line-length = 120
+extend-exclude = [".venv", "__pycache__", "python2.7", "build", "dist"]
+
+[lint]
+# E4/E7/E9 + F：语法错误、未定义名、未使用导入/变量等真实缺陷
+# W：空白类基本格式
+select = ["E4", "E7", "E9", "F", "W"]
+ignore = [
+    "E501",   # 行宽交给 line-length 与人工评审，存量代码不强制
+    "W291",   # 行尾空白（存量较多，不阻断）
+    "W293",
+]
+
+[lint.per-file-ignores]
+# 存量诊断脚本：import 依赖前面的环境初始化代码，不重构
+"test_minio_service.py" = ["E402"]
+"test_minio_cli.py" = ["E402"]

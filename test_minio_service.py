@@ -6,9 +6,7 @@ Tests: Connection, Upload, Download, Config, Search, Batch Download
 
 from __future__ import print_function
 import os
-import sys
 import json
-import time
 import unittest
 from io import BytesIO
 from datetime import datetime

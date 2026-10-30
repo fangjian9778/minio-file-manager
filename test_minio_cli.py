@@ -4,14 +4,14 @@
 minio_cli.py 单元测试 (零依赖)
 运行: python3 test_minio_cli.py
 """
-import os, sys, json, re, hmac, hashlib, base64
-from datetime import datetime, timezone
+import os
+import sys
+import hashlib
 from urllib.parse import quote, urlencode
 
 # 被测模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from minio_cli import (SigV4, sanitize, _human, ProgressBar,
-                        S3Client, DEFAULT_BUCKET, DEFAULT_PATH)
+from minio_cli import (SigV4, sanitize, _human, S3Client)
 
 PASS = 0
 FAIL = 0
